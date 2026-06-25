@@ -171,7 +171,7 @@ def flush_passage_buffer(target_doc, buffer):
 
 
 # ==========================================
-# 1. 일반용 ➡️ 시험지용 변환 엔진 (문제 간 2줄 줄바꿈 규칙 추가)
+# 1. 일반용 ➡️ 시험지용 변환 엔진 (위치 오류 수정 완료)
 # ==========================================
 def convert_general_to_exam_integrated(source_doc):
     template_path = "template_exam.docx"
@@ -188,19 +188,21 @@ def convert_general_to_exam_integrated(source_doc):
             if should_skip_paragraph(p_text):
                 continue
             
-            new_p = target_doc.add_paragraph()
-            new_p.paragraph_format.space_before = p.paragraph_format.space_before
-            new_p.paragraph_format.space_after = p.paragraph_format.space_after
-            
             is_p_answer = "정답" in p_text
             current_color = red_color if is_p_answer else None
             
+            # 💡 [보정 핵심] 문제 번호로 시작하는 문장일 때만 줄바꿈 및 번호 처리 분기
             if re.match(r'^\d+[\.\s]', p_text):
-                # 💡 [요구사항] 문제와 문제 사이에 정확히 2줄의 줄바꿈 강제 삽입
+                # 1번 문제를 제외하고 새로운 문제가 시작되기 직전에 줄바꿈 단락 2개 배치
                 if q_counter > 1:
                     target_doc.add_paragraph()
                     target_doc.add_paragraph()
-                    
+                
+                # 줄바꿈 배치 완료 후 해당 문제의 본문 단락 생성
+                new_p = target_doc.add_paragraph()
+                new_p.paragraph_format.space_before = p.paragraph_format.space_before
+                new_p.paragraph_format.space_after = p.paragraph_format.space_after
+                
                 clean_p_text = re.sub(r'^\d+\.\s*', '', p_text)
                 clean_p_text = re.sub(r'^\d+\s+', '', clean_p_text)
                 
@@ -229,6 +231,11 @@ def convert_general_to_exam_integrated(source_doc):
                     new_run = new_p.add_run(clean_p_text)
                     apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
             else:
+                # 문제 번호가 아닌 일반 단락 (선지, 보기, 지문 등)은 줄바꿈 없이 즉시 생성
+                new_p = target_doc.add_paragraph()
+                new_p.paragraph_format.space_before = p.paragraph_format.space_before
+                new_p.paragraph_format.space_after = p.paragraph_format.space_after
+                
                 if p.runs:
                     for run in p.runs:
                         new_run = new_p.add_run(run.text)
@@ -300,7 +307,7 @@ def convert_general_to_exam_integrated(source_doc):
 
 
 # ==========================================
-# 2. 시험지용 ➡️ 일반용 변환 엔진 (영어 지문 인식 및 표 상자 복구 빌더 탑재)
+# 2. 시험지용 ➡️ 일반용 변환 엔진
 # ==========================================
 def convert_exam_to_general_integrated(source_doc):
     target_doc = Document()
@@ -308,7 +315,6 @@ def convert_exam_to_general_integrated(source_doc):
     q_counter = 1
     red_color = RGBColor(255, 0, 0)
     
-    # 지문 자동 표 래핑용 컨텍스트 상태 관리 변수
     inside_question = False
     passage_buffer = []
     
@@ -320,9 +326,7 @@ def convert_exam_to_general_integrated(source_doc):
             if should_skip_paragraph(p_text):
                 continue
                 
-            # 신규 문제 시작 패턴 감지 (\d+번)
             if re.match(r'^\d+[\.\s]', p_text):
-                # 이전 문제 영역에서 누락/방치된 지문 버퍼가 있다면 마감 처리
                 flush_passage_buffer(target_doc, passage_buffer)
                 inside_question = True
                 
@@ -359,14 +363,11 @@ def convert_exam_to_general_integrated(source_doc):
                     apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color if "정답" in p_text else None)
             
             else:
-                # 💡 [핵심 알고리즘] 문제 내부에서 선지(①~⑤)나 정답 행이 아닌 순수 영어 지문 식별
                 is_option_or_answer = any(idx in p_text for idx in ['①', '②', '③', '④', '⑤']) or "정답" in p_text
                 
                 if inside_question and not is_option_or_answer:
-                    # 선지를 만나기 전 한글 발문 하단의 영어 지문들은 버퍼에 임시 적재
                     passage_buffer.append(p)
                 else:
-                    # ①~⑤번 선지나 정답 행을 만나는 즉시 버퍼에 쌓여있던 영어 지문들을 표(상자)로 밀어 넣음
                     if is_option_or_answer:
                         flush_passage_buffer(target_doc, passage_buffer)
                     
@@ -392,7 +393,6 @@ def convert_exam_to_general_integrated(source_doc):
                         apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
                         
         elif element.tag.endswith('tbl'):
-            # 표 요소를 만나면 버퍼 지문 강제 플러시 후 기존 표 복사 진행
             flush_passage_buffer(target_doc, passage_buffer)
             
             src_tbl = docx.table.Table(element, source_doc)
@@ -445,7 +445,6 @@ def convert_exam_to_general_integrated(source_doc):
                             dst_run = dst_p_cell.add_run(p_cell.text)
                             apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=cell_color)
 
-    # 문서 마지막 영역 처리용 최종 예외 조치 플러시
     flush_passage_buffer(target_doc, passage_buffer)
 
     b_io = io.BytesIO()
