@@ -30,7 +30,7 @@ def is_originally_red(run):
 
 def should_skip_paragraph(text):
     """
-    [초고도화 필터] 대괄호 태그 및 Collocation ~, Vocabulary Reading ~ 등의 
+    [초고도화 필터] 대괄호 태그 및 Collocation, Chunking 등의 
     메타데이터 라인을 완벽하게 판정하여 소거합니다.
     """
     t = re.sub(r'\s+', ' ', text).strip()
@@ -43,9 +43,8 @@ def should_skip_paragraph(text):
     if t.startswith('[') and t.endswith(']'):
         return True
         
-    # 2. 핵심 메타데이터 단독 헤더 집중 소거 (Collocation ~, Vocabulary Reading ~ 완벽 대응)
-    # 해당 핵심어가 문장 내부에 포함되어 있으면서 줄 길이가 짧거나 메타 기호(~, [, ], ▶, ■ 등)와 결합된 경우 헤더로 간주
-    target_meta_words = ["collocation", "vocabulary reading", "vocabulary & reading", "vocabulary/reading"]
+    # 2. 핵심 메타데이터 단독 헤더 집중 소거 (Chunking ~ 추가 반영)
+    target_meta_words = ["collocation", "vocabulary reading", "vocabulary & reading", "vocabulary/reading", "chunking"]
     if any(word in low_t for word in target_meta_words):
         if len(t) < 60 or any(c in t for c in ['~', '[', ']', '▶', '■', '◆', '●', ':']):
             return True
@@ -127,9 +126,52 @@ def set_cell_properties(cell):
         tcBorders.append(border)
     tcPr.append(tcBorders)
 
+def flush_passage_buffer(target_doc, buffer):
+    """버퍼링된 평문 지문들을 일반용 지문 상자(표 1칸) 구조로 빌드하여 삽입합니다."""
+    if not buffer:
+        return
+        
+    table = target_doc.add_table(rows=1, cols=1)
+    table.style = 'Table Grid'
+    set_table_width_to_column(table)
+    cell = table.cell(0, 0)
+    set_cell_properties(cell)
+    
+    cell.text = "" # 디폴트 생성 공백 초기화
+    is_first = True
+    
+    for p_src in buffer:
+        if is_first:
+            p_dst = cell.paragraphs[0]
+            is_first = False
+        else:
+            p_dst = cell.add_paragraph()
+            
+        p_dst.paragraph_format.line_spacing = 1.2
+        p_dst.paragraph_format.space_after = Pt(4)
+        
+        if p_src.runs:
+            for run in p_src.runs:
+                dst_run = p_dst.add_run(run.text)
+                dst_run.bold = run.bold
+                dst_run.italic = run.italic
+                dst_run.underline = run.underline
+                if "정답" in run.text or is_originally_red(run):
+                    apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=RGBColor(255, 0, 0))
+                else:
+                    apply_custom_style(dst_run, font_name="Noto Sans KR")
+        else:
+            dst_run = p_dst.add_run(p_src.text)
+            if "정답" in p_src.text:
+                apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=RGBColor(255, 0, 0))
+            else:
+                apply_custom_style(dst_run, font_name="Noto Sans KR")
+                
+    buffer.clear()
+
 
 # ==========================================
-# 1. 일반용 ➡️ 시험지용 변환 엔진 (텍스트 유실 방지 Fallback 주입)
+# 1. 일반용 ➡️ 시험지용 변환 엔진 (문제 간 2줄 줄바꿈 규칙 추가)
 # ==========================================
 def convert_general_to_exam_integrated(source_doc):
     template_path = "template_exam.docx"
@@ -154,9 +196,15 @@ def convert_general_to_exam_integrated(source_doc):
             current_color = red_color if is_p_answer else None
             
             if re.match(r'^\d+[\.\s]', p_text):
+                # 💡 [요구사항] 문제와 문제 사이에 정확히 2줄의 줄바꿈 강제 삽입
+                if q_counter > 1:
+                    target_doc.add_paragraph()
+                    target_doc.add_paragraph()
+                    
                 clean_p_text = re.sub(r'^\d+\.\s*', '', p_text)
                 clean_p_text = re.sub(r'^\d+\s+', '', clean_p_text)
                 
+                # 새로운 문제 번호 주입 후 카운터 업
                 run_num = new_p.add_run(f"{q_counter}.  ")
                 run_num.bold = True
                 apply_custom_style(run_num, font_name="Noto Sans KR", color_rgb=current_color)
@@ -178,7 +226,6 @@ def convert_general_to_exam_integrated(source_doc):
                             else:
                                 apply_custom_style(new_run, font_name="Noto Sans KR")
                 else:
-                    # 💡 [Fallback] 문단에 runs 구조가 깨져있을 때 텍스트 유실 방지
                     new_run = new_p.add_run(clean_p_text)
                     apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
             else:
@@ -193,7 +240,6 @@ def convert_general_to_exam_integrated(source_doc):
                         else:
                             apply_custom_style(new_run, font_name="Noto Sans KR")
                 else:
-                    # 💡 [Fallback] 일반 문단 runs 유실 방지
                     new_run = new_p.add_run(p.text)
                     apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
                         
@@ -245,7 +291,6 @@ def convert_general_to_exam_integrated(source_doc):
                                 else:
                                     apply_custom_style(dst_run, font_name="Noto Sans KR")
                         else:
-                            # 💡 [Fallback] 표 내부 runs 구조 누락 방지
                             dst_run = dst_p_cell.add_run(p_cell.text)
                             apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=cell_color)
 
@@ -255,13 +300,17 @@ def convert_general_to_exam_integrated(source_doc):
 
 
 # ==========================================
-# 2. 시험지용 ➡️ 일반용 변환 엔진 (표 내부 지문 인식 실패 오류 완벽 해결)
+# 2. 시험지용 ➡️ 일반용 변환 엔진 (영어 지문 인식 및 표 상자 복구 빌더 탑재)
 # ==========================================
 def convert_exam_to_general_integrated(source_doc):
     target_doc = Document()
     
     q_counter = 1
     red_color = RGBColor(255, 0, 0)
+    
+    # 지문 자동 표 래핑용 컨텍스트 상태 관리 변수
+    inside_question = False
+    passage_buffer = []
     
     for element in source_doc.element.body:
         if element.tag.endswith('p'):
@@ -271,20 +320,22 @@ def convert_exam_to_general_integrated(source_doc):
             if should_skip_paragraph(p_text):
                 continue
                 
-            new_p = target_doc.add_paragraph()
-            new_p.paragraph_format.space_before = p.paragraph_format.space_before
-            new_p.paragraph_format.space_after = p.paragraph_format.space_after
-            
-            is_p_answer = "정답" in p_text
-            current_color = red_color if is_p_answer else None
-            
+            # 신규 문제 시작 패턴 감지 (\d+번)
             if re.match(r'^\d+[\.\s]', p_text):
+                # 이전 문제 영역에서 누락/방치된 지문 버퍼가 있다면 마감 처리
+                flush_passage_buffer(target_doc, passage_buffer)
+                inside_question = True
+                
+                new_p = target_doc.add_paragraph()
+                new_p.paragraph_format.space_before = p.paragraph_format.space_before
+                new_p.paragraph_format.space_after = p.paragraph_format.space_after
+                
                 clean_p_text = re.sub(r'^\d+\.\s*', '', p_text)
                 clean_p_text = re.sub(r'^\d+\s+', '', clean_p_text)
                 
                 run_num = new_p.add_run(f"{q_counter}.  ")
                 run_num.bold = True
-                apply_custom_style(run_num, font_name="Noto Sans KR", color_rgb=current_color)
+                apply_custom_style(run_num, font_name="Noto Sans KR", color_rgb=red_color if "정답" in p_text else None)
                 q_counter += 1
                 
                 if p.runs:
@@ -299,29 +350,51 @@ def convert_exam_to_general_integrated(source_doc):
                             new_run.bold = run.bold
                             new_run.italic = run.italic
                             new_run.underline = run.underline
-                            if is_p_answer or "정답" in run.text or is_originally_red(run):
+                            if "정답" in run.text or is_originally_red(run):
                                 apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
                             else:
                                 apply_custom_style(new_run, font_name="Noto Sans KR")
                 else:
                     new_run = new_p.add_run(clean_p_text)
-                    apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
+                    apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color if "정답" in p_text else None)
+            
             else:
-                if p.runs:
-                    for run in p.runs:
-                        new_run = new_p.add_run(run.text)
-                        new_run.bold = run.bold
-                        new_run.italic = run.italic
-                        new_run.underline = run.underline
-                        if is_p_answer or "정답" in run.text or is_originally_red(run):
-                            apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
-                        else:
-                            apply_custom_style(new_run, font_name="Noto Sans KR")
+                # 💡 [핵심 알고리즘] 문제 내부에서 선지(①~⑤)나 정답 행이 아닌 순수 영어 지문 식별
+                is_option_or_answer = any(idx in p_text for idx in ['①', '②', '③', '④', '⑤']) or "정답" in p_text
+                
+                if inside_question and not is_option_or_answer:
+                    # 선지를 만나기 전 한글 발문 하단의 영어 지문들은 버퍼에 임시 적재
+                    passage_buffer.append(p)
                 else:
-                    new_run = new_p.add_run(p.text)
-                    apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
+                    # ①~⑤번 선지나 정답 행을 만나는 즉시 버퍼에 쌓여있던 영어 지문들을 표(상자)로 밀어 넣음
+                    if is_option_or_answer:
+                        flush_passage_buffer(target_doc, passage_buffer)
+                    
+                    new_p = target_doc.add_paragraph()
+                    new_p.paragraph_format.space_before = p.paragraph_format.space_before
+                    new_p.paragraph_format.space_after = p.paragraph_format.space_after
+                    
+                    is_p_answer = "정답" in p_text
+                    current_color = red_color if is_p_answer else None
+                    
+                    if p.runs:
+                        for run in p.runs:
+                            new_run = new_p.add_run(run.text)
+                            new_run.bold = run.bold
+                            new_run.italic = run.italic
+                            new_run.underline = run.underline
+                            if is_p_answer or "정답" in run.text or is_originally_red(run):
+                                apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
+                            else:
+                                apply_custom_style(new_run, font_name="Noto Sans KR")
+                    else:
+                        new_run = new_p.add_run(p.text)
+                        apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
                         
         elif element.tag.endswith('tbl'):
+            # 표 요소를 만나면 버퍼 지문 강제 플러시 후 기존 표 복사 진행
+            flush_passage_buffer(target_doc, passage_buffer)
+            
             src_tbl = docx.table.Table(element, source_doc)
             has_valid_content = False
             for row in src_tbl.rows:
@@ -369,9 +442,11 @@ def convert_exam_to_general_integrated(source_doc):
                                 else:
                                     apply_custom_style(dst_run, font_name="Noto Sans KR")
                         else:
-                            # 💡 [핵심오류 해결] 시험지 표 내부에 서식이 없어 runs가 비어있던 지문 텍스트를 완벽하게 강제 추출/복구합니다.
                             dst_run = dst_p_cell.add_run(p_cell.text)
                             apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=cell_color)
+
+    # 문서 마지막 영역 처리용 최종 예외 조치 플러시
+    flush_passage_buffer(target_doc, passage_buffer)
 
     b_io = io.BytesIO()
     target_doc.save(b_io)
@@ -392,13 +467,13 @@ if uploaded_file is not None:
     conversion_mode = st.radio(
         "원하시는 변환 작업 방향을 선택하세요:",
         [
-            "일반용 ➡️ 시험지용 (2단 레이아웃 단 맞춤, 태그 소거, 정답지 빨간색 강제 지정)", 
-            "시험지용 ➡️ 일반용 (1단 기본 문서 레이아웃 복원, 표 내부 지문 완벽 복구 추출)"
+            "일반용 ➡️ 시험지용 (2단 레이아웃 단 맞춤, 태그 소거, 문제 간 2줄 줄바꿈 적용)", 
+            "시험지용 ➡️ 일반용 (1단 레이아웃 복원, 평문 영어 지문을 상자 표 내부로 자동 복구 추출)"
         ]
     )
     
     if st.button("🚀 선택한 모드로 정밀 변환 시작", use_container_width=True):
-        with st.spinner("문서 데이터베이스 파싱 및 지문 인코딩 예외 교정 중..."):
+        with st.spinner("문서 컨텍스트 및 지문 인코딩 예외 교정 중..."):
             try:
                 if "일반용 ➡️ 시험지용" in conversion_mode:
                     out_bytes = convert_general_to_exam_integrated(doc)
@@ -407,7 +482,7 @@ if uploaded_file is not None:
                     out_bytes = convert_exam_to_general_integrated(doc)
                     download_filename = "정기평가_복원형_일반문서.docx"
                     
-                st.success("🎉 요청하신 지문 유실 및 헤더 필터링 문제가 완벽히 수정되었습니다!")
+                st.success("🎉 지문 자동 상자 래핑 및 문제 간격 조정 패치가 적용되었습니다!")
                 st.download_button(
                     label="💾 완성본 파일 다운로드",
                     data=out_bytes,
