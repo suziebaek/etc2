@@ -19,41 +19,37 @@ st.set_page_config(
 # ==========================================
 def should_skip_paragraph(text):
     """
-    [강화된 필터] 워드 특유의 깨진 공백(\\xa0)을 정규화하고, 
+    워드 특유의 깨진 공백(\\xa0)을 정규화하고, 
     대괄호로 시작하거나 메타데이터 키워드가 포함된 줄을 완벽하게 걸러냅니다.
     """
-    # 1. 눈에 보이지 않는 줄바꿈, 탭, Non-breaking space(\\xa0) 등을 모두 일반 공백으로 통합
     t = re.sub(r'\s+', ' ', text).strip()
-    
     if not t or "The following table:" in t:
         return True
     
     low_t = t.lower()
     
-    # 2. 대괄호 [ ] 로 시작해서 끝나는 모든 라인은 메타데이터로 간주하고 무조건 스킵
+    # 대괄호 [ ] 로 시작해서 끝나는 모든 라인은 메타데이터로 간주하고 무조건 스킵
     if t.startswith('[') and t.endswith(']'):
         return True
         
-    # 3. 대괄호가 열려있거나 한쪽만 있더라도 아래 교육용 메타 키워드가 포함되어 있다면 확정 스킵
+    # 대괄호가 열려있거나 한쪽만 있더라도 교육용 메타 키워드가 포함되어 있다면 확정 스킵
     metadata_keywords = [
         "chapter", "collocation", "vocabulary", "reading", "word arrangement", 
         "fill in the blank", "교재 연계", "객관-간접", "sentence transformation", 
         "correct sentence", "pg"
     ]
     
-    # 문장이 대괄호([)로 시작하거나 대괄호(])로 끝나는 구역 안에서 키워드가 발견되면 스킵
     if t.startswith('[') or t.endswith(']'):
         if any(kw in low_t for kw in metadata_keywords):
             return True
             
-    # 혹시 모를 예외를 위해 핵심 키워드 단독 매칭도 지원 (단독 라인 보호)
     if any(kw in low_t for kw in ["vocabulary reading", "collocation"]):
         return True
                 
     return False
 
 def apply_custom_style(run, font_name="Noto Sans KR", color_rgb=None):
-    """텍스트 Run에 Noto Sans KR 글꼴 및 지정된 색상을 정밀하게 적용합니다."""
+    """텍스트 Run에 Noto Sans KR 글꼴(동아시아 깨짐 방지 XML 포함) 및 지정된 색상을 적용합니다."""
     run.font.name = font_name
     if color_rgb:
         run.font.color.rgb = color_rgb
@@ -116,7 +112,7 @@ def set_cell_properties(cell):
 
 
 # ==========================================
-# 1. 일반용 ➡️ 시험지용 변환 엔진
+# 1. [기능 A] 일반용 ➡️ 시험지용 변환 엔진
 # ==========================================
 def convert_general_to_exam_integrated(source_doc):
     template_path = "template_exam.docx"
@@ -126,7 +122,7 @@ def convert_general_to_exam_integrated(source_doc):
     red_color = RGBColor(255, 0, 0)
     
     for element in source_doc.element.body:
-        # [1] 일반 문단 처리
+        # 일반 문단 처리
         if element.tag.endswith('p'):
             p = docx.text.paragraph.Paragraph(element, source_doc)
             p_text = p.text.strip()
@@ -164,7 +160,7 @@ def convert_general_to_exam_integrated(source_doc):
                     new_run.underline = run.underline
                     apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
                         
-        # [2] 지문 표(Table) 처리
+        # 지문 표(Table) 처리
         elif element.tag.endswith('tbl'):
             src_tbl = docx.table.Table(element, source_doc)
             
@@ -219,7 +215,7 @@ def convert_general_to_exam_integrated(source_doc):
 
 
 # ==========================================
-# 2. 시험지용 ➡️ 일반용 데이터 복원 로직
+# 2. [기능 B] 시험지용 ➡️ 일반용 변환 엔진
 # ==========================================
 def convert_exam_to_general_integrated(source_doc):
     doc_stream = io.BytesIO()
@@ -238,6 +234,7 @@ def convert_exam_to_general_integrated(source_doc):
             p.add_run(clean_text)
             q_counter += 1
             
+        # 일반용 복원 시에도 깨끗하게 Noto Sans KR 스타일 재정렬
         for run in p.runs:
             apply_custom_style(run, font_name="Noto Sans KR")
 
@@ -247,27 +244,43 @@ def convert_exam_to_general_integrated(source_doc):
 
 
 # ==========================================
-# 3. Streamlit 웹 인터페이스
+# 3. Streamlit 웹 사용자 인터페이스 (선택 기능 복원)
 # ==========================================
 st.title("📝 정기평가 양식 최고 고도화 시스템")
-st.markdown("가로 너비 **100% 단 맞춤** / **Noto Sans KR 글꼴** / **정답지 빨간색** / **[Vocabulary Reading] 등 모든 메타 태그 완벽 제거** 버전입니다.")
+st.markdown("가로 너비 **100% 단 맞춤** / **Noto Sans KR 글꼴** / **정답지 빨간색** / **메타 태그 완벽 제거** 기능이 탑재된 통합 변환기입니다.")
 
 uploaded_file = st.file_uploader("변환할 정기평가 Word 파일(.docx)을 업로드하세요.", type=["docx"])
 
 if uploaded_file is not None:
     doc = Document(uploaded_file)
     
-    if st.button("🚀 최종 고도화 변환 시작", use_container_width=True):
-        with st.spinner("유령 공백 제거 및 메타데이터 괄호 태그 필터링 작업 중..."):
+    # 💡 [복원 완료] 사용자가 직접 방향을 고를 수 있는 라디오 버튼 추가
+    conversion_mode = st.radio(
+        "원하시는 변환 작업 방향을 선택하세요:",
+        [
+            "일반용 ➡️ 시험지용 (단 길이 맞춤, 태그 소거, 정답지 빨간색 적용)", 
+            "시험지용 ➡️ 일반용 (문항 번호 순차 재정렬 및 폰트 표준화)"
+        ]
+    )
+    
+    if st.button("🚀 선택한 모드로 변환 시작", use_container_width=True):
+        with st.spinner("문서 내부 XML 구조를 분석하고 양식을 재구성하는 중..."):
             try:
-                out_bytes = convert_general_to_exam_integrated(doc)
-                st.success("🎉 모든 불필요 태그가 소거되고 변환이 완벽히 완료되었습니다!")
+                # 선택된 모드에 따라 분기 처리 실행
+                if "일반용 ➡️ 시험지용" in conversion_mode:
+                    out_bytes = convert_general_to_exam_integrated(doc)
+                    download_filename = "정기평가_최종형_시험지문서.docx"
+                else:
+                    out_bytes = convert_exam_to_general_integrated(doc)
+                    download_filename = "정기평가_복원형_일반문서.docx"
+                    
+                st.success("🎉 변환이 완벽하게 완료되었습니다!")
                 st.download_button(
-                    label="💾 완성본 시험지 다운로드",
+                    label="💾 완성본 파일 다운로드",
                     data=out_bytes,
-                    file_name="정기평가_최종형_출력문서.docx",
+                    file_name=download_filename,
                     mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                     use_container_width=True
                 )
             except Exception as e:
-                st.error(f"⚠️ 시스템 오류가 발생했습니다: {str(e)}")
+                st.error(f"⚠️ 시스템 변환 처리 중 오류 발생: {str(e)}")
