@@ -382,164 +382,246 @@ def convert_general_to_exam_integrated(source_doc):
 # ==========================================
 # 2. 시험지용 ➡️ 일반용 변환 엔진
 # ==========================================
+
+def is_option_line(text):
+    return any(text.strip().startswith(idx) for idx in ['①', '②', '③', '④', '⑤'])
+
+def is_answer_line(text):
+    return "정답" in text
+
+def is_english_passage(text):
+    """
+    영어 지문 단락 판별:
+    - 선지·정답으로 시작하면 제외
+    - 영어 알파벳이 있고 한글 비율이 낮은 경우 (30% 미만)
+    - '=' 또는 '→'로 시작하는 영어 문장 포함
+    """
+    t = text.strip()
+    if not t:
+        return False
+    if is_option_line(t) or is_answer_line(t):
+        return False
+    korean_chars = len(re.findall(r'[\uAC00-\uD7A3]', t))
+    total_chars = len(re.sub(r'\s', '', t))
+    if total_chars == 0:
+        return False
+    korean_ratio = korean_chars / total_chars
+    has_english = bool(re.search(r'[a-zA-Z]', t))
+    starts_with_marker = t.startswith('=') or t.startswith('→')
+    if has_english and korean_ratio < 0.3:
+        return True
+    if starts_with_marker and has_english:
+        return True
+    return False
+
+def write_run_copy(dst_p, run, red_color, force_red=False):
+    new_run = dst_p.add_run(run.text)
+    new_run.bold = run.bold
+    new_run.italic = run.italic
+    new_run.underline = run.underline
+    if force_red or is_answer_line(run.text) or is_originally_red(run):
+        apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
+    else:
+        apply_custom_style(new_run, font_name="Noto Sans KR")
+
+def flush_passage_box(target_doc, passage_texts, red_color):
+    """수집된 지문 텍스트를 1칸 표(지문 상자)로 변환하여 삽입"""
+    if not passage_texts:
+        return
+    table = target_doc.add_table(rows=1, cols=1)
+    table.style = 'Table Grid'
+    set_table_width_to_column(table)
+    cell = table.cell(0, 0)
+    set_cell_properties(cell)
+    cell.text = ""
+    is_first = True
+    for (full_text, runs_info) in passage_texts:
+        if is_first:
+            p_dst = cell.paragraphs[0]
+            is_first = False
+        else:
+            p_dst = cell.add_paragraph()
+        p_dst.paragraph_format.line_spacing = 1.2
+        p_dst.paragraph_format.space_after = Pt(4)
+        if runs_info:
+            for (rt, rb, ri, ru, ir) in runs_info:
+                new_run = p_dst.add_run(rt)
+                new_run.bold = rb
+                new_run.italic = ri
+                new_run.underline = ru
+                if ir or is_answer_line(rt):
+                    apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
+                else:
+                    apply_custom_style(new_run, font_name="Noto Sans KR")
+        else:
+            new_run = p_dst.add_run(full_text)
+            apply_custom_style(new_run, font_name="Noto Sans KR",
+                               color_rgb=red_color if is_answer_line(full_text) else None)
+
+def collect_runs_info(p):
+    result = []
+    for run in p.runs:
+        if run.text:
+            result.append((run.text, run.bold, run.italic, run.underline, is_originally_red(run)))
+    return result
+
 def convert_exam_to_general_integrated(source_doc):
+    """
+    핵심 로직 (2-pass):
+
+    1차 수집: body 요소를 순회하며 아래 규칙으로 지문을 탐지·수집한다.
+      - <tbl> 요소: 문제번호 단락 직후에 나오면 무조건 지문으로 수집
+      - <p> 요소 중 is_english_passage() == True: 지문으로 수집
+      - 선지(①~⑤)를 만나는 순간 수집된 지문을 flush_passage_box()로 표 변환 후 출력
+
+    이 방식은 state 머신 대신 '영어 지문 여부'로 직접 판별하므로
+    <tbl>/<p> 형태 모두 정확하게 처리한다.
+    """
     target_doc = Document()
-    
-    q_counter = 1
     red_color = RGBColor(255, 0, 0)
-    
-    inside_question = False
-    passage_buffer = []
-    
+    q_counter = 1
+    passage_buffer = []   # list of (full_text, runs_info)
+    after_question = False  # 문제번호 단락 직후 상태
+
+    def do_flush():
+        flush_passage_box(target_doc, passage_buffer, red_color)
+        passage_buffer.clear()
+
+    def write_plain_paragraph(p, p_text):
+        new_p = target_doc.add_paragraph()
+        new_p.paragraph_format.space_before = p.paragraph_format.space_before
+        new_p.paragraph_format.space_after = p.paragraph_format.space_after
+        is_red = is_answer_line(p_text)
+        if p.runs:
+            for run in p.runs:
+                write_run_copy(new_p, run, red_color, force_red=is_red)
+        else:
+            new_run = new_p.add_run(p_text)
+            apply_custom_style(new_run, font_name="Noto Sans KR",
+                               color_rgb=red_color if is_red else None)
+
+    def write_question_paragraph(p, p_text):
+        nonlocal q_counter
+        new_p = target_doc.add_paragraph()
+        new_p.paragraph_format.space_before = p.paragraph_format.space_before
+        new_p.paragraph_format.space_after = p.paragraph_format.space_after
+        # 번호 run: 볼드
+        run_num = new_p.add_run(f"{q_counter}.")
+        run_num.bold = True
+        apply_custom_style(run_num, font_name="Noto Sans KR")
+        run_sp = new_p.add_run(" ")
+        run_sp.bold = True
+        apply_custom_style(run_sp, font_name="Noto Sans KR")
+        q_counter += 1
+        # 번호 prefix 제거 후 나머지 텍스트 복사
+        prefix = re.match(r'^\d+[\.\s]+', p_text)
+        prefix_len = len(prefix.group()) if prefix else 0
+        if p.runs:
+            consumed = 0
+            for run in p.runs:
+                r_text = run.text
+                if consumed < prefix_len:
+                    skip = min(prefix_len - consumed, len(r_text))
+                    r_text = r_text[skip:]
+                consumed += len(run.text)
+                if r_text:
+                    new_run = new_p.add_run(r_text)
+                    new_run.bold = run.bold
+                    new_run.italic = run.italic
+                    new_run.underline = run.underline
+                    apply_custom_style(new_run, font_name="Noto Sans KR",
+                                       color_rgb=red_color if is_originally_red(run) else None)
+        else:
+            clean = re.sub(r'^\d+[\.\s]+', '', p_text)
+            new_run = new_p.add_run(clean)
+            apply_custom_style(new_run, font_name="Noto Sans KR")
+
     for element in source_doc.element.body:
-        if element.tag.endswith('p'):
+        tag = element.tag.split('}')[-1]
+
+        if tag == 'p':
             p = docx.text.paragraph.Paragraph(element, source_doc)
             p_text = p.text.strip()
-            
             if should_skip_paragraph(p_text):
                 continue
-                
+
             if re.match(r'^\d+[\.\s]', p_text):
-                flush_passage_buffer(target_doc, passage_buffer)
-                inside_question = True
-                
-                new_p = target_doc.add_paragraph()
-                new_p.paragraph_format.space_before = p.paragraph_format.space_before
-                new_p.paragraph_format.space_after = p.paragraph_format.space_after
-                
-                clean_p_text = re.sub(r'^\d+\.\s*', '', p_text)
-                clean_p_text = re.sub(r'^\d+\s+', '', clean_p_text)
-                
-                run_num = new_p.add_run(f"{q_counter}.")
-                run_num.bold = True
-                apply_custom_style(run_num, font_name="Noto Sans KR", color_rgb=red_color if "정답" in p_text else None)
-                q_counter += 1
-                
-                # 공백 run
-                run_sp = new_p.add_run(" ")
-                run_sp.bold = True
-                apply_custom_style(run_sp, font_name="Noto Sans KR")
-                
-                if p.runs:
-                    for run in p.runs:
-                        r_text = run.text
-                        if r_text.strip().startswith(p_text[:2]):
-                            r_text = re.sub(r'^\d+\.\s*', '', r_text)
-                            r_text = re.sub(r'^\d+\s+', '', r_text)
-                            
-                        if r_text:
-                            new_run = new_p.add_run(r_text)
-                            new_run.bold = run.bold
-                            new_run.italic = run.italic
-                            new_run.underline = run.underline
-                            if "정답" in run.text or is_originally_red(run):
-                                apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
-                            else:
-                                apply_custom_style(new_run, font_name="Noto Sans KR")
-                else:
-                    new_run = new_p.add_run(clean_p_text)
-                    apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color if "정답" in p_text else None)
-            
+                # ── 문제 번호 단락 ──
+                do_flush()
+                after_question = True
+                write_question_paragraph(p, p_text)
+
+            elif is_option_line(p_text):
+                # ── 선지: 직전까지 쌓인 지문 flush 후 선지 출력 ──
+                do_flush()
+                after_question = False
+                write_plain_paragraph(p, p_text)
+
+            elif is_answer_line(p_text):
+                # ── 정답: 그대로 출력 ──
+                do_flush()
+                after_question = False
+                write_plain_paragraph(p, p_text)
+
+            elif after_question and is_english_passage(p_text):
+                # ── 문제번호 직후 영어 텍스트: 지문으로 수집 ──
+                passage_buffer.append((p_text, collect_runs_info(p)))
+
             else:
-                is_option_or_answer = any(idx in p_text for idx in ['①', '②', '③', '④', '⑤']) or "정답" in p_text
-                
-                if inside_question and not is_option_or_answer:
-                    passage_buffer.append(p)
-                else:
-                    if is_option_or_answer:
-                        flush_passage_buffer(target_doc, passage_buffer)
-                    
-                    new_p = target_doc.add_paragraph()
-                    new_p.paragraph_format.space_before = p.paragraph_format.space_before
-                    new_p.paragraph_format.space_after = p.paragraph_format.space_after
-                    
-                    is_p_answer = "정답" in p_text
-                    current_color = red_color if is_p_answer else None
-                    
-                    if p.runs:
-                        for run in p.runs:
-                            new_run = new_p.add_run(run.text)
-                            new_run.bold = run.bold
-                            new_run.italic = run.italic
-                            new_run.underline = run.underline
-                            if is_p_answer or "정답" in run.text or is_originally_red(run):
-                                apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=red_color)
-                            else:
-                                apply_custom_style(new_run, font_name="Noto Sans KR")
-                    else:
-                        new_run = new_p.add_run(p.text)
-                        apply_custom_style(new_run, font_name="Noto Sans KR", color_rgb=current_color)
-                        
-        elif element.tag.endswith('tbl'):
-            # ★ 시험지용 → 일반용: 표(지문 상자)를 passage_buffer로 처리
+                # ── 그 외(한국어 부가 설명 등): 바로 출력 ──
+                do_flush()
+                after_question = False
+                write_plain_paragraph(p, p_text)
+
+        elif tag == 'tbl':
             src_tbl = docx.table.Table(element, source_doc)
-            
-            # 표 내 유효한 내용이 있는지 확인
-            has_valid_content = any(
-                p_cell.text.strip() and not should_skip_paragraph(p_cell.text)
+            tbl_paras = [
+                p_cell
                 for row in src_tbl.rows
                 for cell in row.cells
                 for p_cell in cell.paragraphs
-            )
-            if not has_valid_content:
+                if p_cell.text.strip() and not should_skip_paragraph(p_cell.text)
+            ]
+            if not tbl_paras:
                 continue
 
-            if inside_question:
-                # 지문 상자: 표 내 단락들을 passage_buffer에 추가
-                for row in src_tbl.rows:
-                    for cell in row.cells:
-                        for p_cell in cell.paragraphs:
-                            if p_cell.text.strip() and not should_skip_paragraph(p_cell.text):
-                                passage_buffer.append(p_cell)
+            if after_question:
+                # ── 문제번호 직후 표: 지문으로 수집 ──
+                for p_cell in tbl_paras:
+                    passage_buffer.append((p_cell.text.strip(), collect_runs_info(p_cell)))
             else:
-                # 문제 바깥의 표는 그대로 복사
-                flush_passage_buffer(target_doc, passage_buffer)
+                # ── 그 외 표: 그대로 복사 ──
+                do_flush()
                 dst_tbl = target_doc.add_table(rows=len(src_tbl.rows), cols=len(src_tbl.columns))
                 dst_tbl.style = 'Table Grid'
                 set_table_width_to_column(dst_tbl)
-                
                 for r_idx, row in enumerate(src_tbl.rows):
                     for c_idx, cell in enumerate(row.cells):
                         dst_cell = dst_tbl.cell(r_idx, c_idx)
                         set_cell_properties(dst_cell)
                         dst_cell.text = ""
-                        
                         is_first_p = True
                         for p_cell in cell.paragraphs:
                             if should_skip_paragraph(p_cell.text):
                                 continue
-                            if is_first_p:
-                                dst_p_cell = dst_cell.paragraphs[0]
-                                is_first_p = False
-                            else:
-                                dst_p_cell = dst_cell.add_paragraph()
-                                
-                            dst_p_cell.paragraph_format.line_spacing = 1.2
-                            dst_p_cell.paragraph_format.space_after = Pt(2)
-                            
-                            is_cell_answer = "정답" in p_cell.text
-                            cell_color = red_color if is_cell_answer else None
-                            
+                            dst_p = dst_cell.paragraphs[0] if is_first_p else dst_cell.add_paragraph()
+                            is_first_p = False
+                            dst_p.paragraph_format.line_spacing = 1.2
+                            dst_p.paragraph_format.space_after = Pt(2)
+                            is_red = is_answer_line(p_cell.text)
                             if p_cell.runs:
                                 for run in p_cell.runs:
-                                    dst_run = dst_p_cell.add_run(run.text)
-                                    dst_run.bold = run.bold
-                                    dst_run.italic = run.italic
-                                    dst_run.underline = run.underline
-                                    if is_cell_answer or "정답" in run.text or is_originally_red(run):
-                                        apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=red_color)
-                                    else:
-                                        apply_custom_style(dst_run, font_name="Noto Sans KR")
+                                    write_run_copy(dst_p, run, red_color, force_red=is_red)
                             else:
-                                dst_run = dst_p_cell.add_run(p_cell.text)
-                                apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=cell_color)
+                                new_run = dst_p.add_run(p_cell.text)
+                                apply_custom_style(new_run, font_name="Noto Sans KR",
+                                                   color_rgb=red_color if is_red else None)
 
-    flush_passage_buffer(target_doc, passage_buffer)
+    do_flush()
 
     b_io = io.BytesIO()
     target_doc.save(b_io)
     return b_io.getvalue()
-
 
 # ==========================================
 # 3. Streamlit 웹 대시보드 인터페이스
