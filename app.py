@@ -17,6 +17,29 @@ st.set_page_config(
 # ==========================================
 # [공통 유틸리티 함수]
 # ==========================================
+def get_body_elements(doc):
+    """
+    body의 직계 자식(p, tbl)을 순서대로 반환한다.
+    단, <w:sdt>(콘텐츠 컨트롤)로 감싸진 표/단락은 풀어서(unwrap)
+    그 안의 sdtContent 자식들을 같은 위치에서 그대로 반환한다.
+    (Word에서 표나 단락이 콘텐츠 컨트롤로 감싸져 저장되는 경우 대응)
+    """
+    w_ns = '{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    result = []
+    for el in doc.element.body:
+        tag = el.tag.split('}')[-1]
+        if tag == 'sdt':
+            sdt_content = el.find(f'{w_ns}sdtContent')
+            if sdt_content is not None:
+                for inner in sdt_content:
+                    inner_tag = inner.tag.split('}')[-1]
+                    if inner_tag in ('p', 'tbl'):
+                        result.append(inner)
+        elif tag in ('p', 'tbl'):
+            result.append(el)
+    return result
+
+
 def is_originally_red(run):
     try:
         if run.font.color and run.font.color.rgb:
@@ -238,7 +261,7 @@ def convert_general_to_exam_integrated(source_doc):
     q_counter = 1
     red_color = RGBColor(255, 0, 0)
     
-    for element in source_doc.element.body:
+    for element in get_body_elements(source_doc):
         if element.tag.endswith('p'):
             p = docx.text.paragraph.Paragraph(element, source_doc)
             p_text = p.text.strip()
@@ -536,7 +559,7 @@ def convert_exam_to_general_integrated(source_doc):
             new_run = new_p.add_run(clean)
             apply_custom_style(new_run, font_name="Noto Sans KR")
 
-    for element in source_doc.element.body:
+    for element in get_body_elements(source_doc):
         tag = element.tag.split('}')[-1]
 
         if tag == 'p':
