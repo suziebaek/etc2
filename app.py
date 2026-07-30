@@ -148,6 +148,61 @@ def set_cell_properties(cell):
         tcBorders.append(border)
     tcPr.append(tcBorders)
 
+def is_source_label_line(text):
+    """
+    'Vocabulary SR W8', 'Vocabulary Reading W3' 같은 출처(문항 소스) 표기 라인을 판별한다.
+    영문/공백으로만 이루어져 있고 끝이 'W숫자' 형태로 끝나는 짧은 줄을 출처 라인으로 간주한다.
+    """
+    t = text.strip()
+    if not t:
+        return False
+    if re.match(r'^[A-Za-z][A-Za-z\s&/]*\sW\d+$', t):
+        return True
+    return False
+
+def extract_level_from_filename(filename):
+    """업로드 파일명에서 'Level_T', 'Level T' 등의 패턴으로 레벨 알파벳을 추출한다."""
+    if not filename:
+        return None
+    m = re.search(r'Level[_\s]?([A-Za-z])', filename, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
+def fix_level_label(target_doc, level_letter):
+    """템플릿에 고정 삽입된 '(Level X)' 표기를 업로드 파일명 기준 레벨로 교체한다."""
+    if not level_letter:
+        return
+    pattern = re.compile(r'\(Level\s*[A-Za-z0-9]+\)', re.IGNORECASE)
+    for p in target_doc.paragraphs:
+        full_text = p.text
+        if not pattern.search(full_text):
+            continue
+        new_text = pattern.sub(f'(Level {level_letter})', full_text)
+        if new_text == full_text or not p.runs:
+            break
+        # 패턴이 단일 run 안에 있으면 해당 run만 치환
+        replaced = False
+        for run in p.runs:
+            if pattern.search(run.text):
+                run.text = pattern.sub(f'(Level {level_letter})', run.text)
+                replaced = True
+                break
+        if not replaced:
+            # 패턴이 여러 run에 걸쳐 있는 경우: 첫 run의 서식을 유지하며 텍스트 재구성
+            base_run = p.runs[0]
+            font_name = base_run.font.name
+            bold = base_run.bold
+            size = base_run.font.size
+            for r in list(p.runs):
+                r.text = ""
+            p.runs[0].text = new_text
+            p.runs[0].bold = bold
+            if size:
+                p.runs[0].font.size = size
+            apply_custom_style(p.runs[0], font_name=font_name or "Noto Sans KR")
+        break
+
 def apply_exam_page_layout(target_doc):
     """
     일반용 문서(2단 컬럼, 좁은 여백) 페이지 레이아웃 적용.
@@ -254,7 +309,7 @@ LINE_SPACING_BODY  = 240       # 선지/정답 줄간격
 # ==========================================
 # 1. 일반용 ➡️ 시험지용 변환 엔진
 # ==========================================
-def convert_general_to_exam_integrated(source_doc):
+def convert_general_to_exam_integrated(source_doc, source_filename=None):
     template_path = "template_exam.docx"
     target_doc = Document(template_path) if os.path.exists(template_path) else Document()
     
@@ -269,6 +324,10 @@ def convert_general_to_exam_integrated(source_doc):
             if should_skip_paragraph(p_text):
                 continue
             
+            if is_source_label_line(p_text):
+                # ── 출처 표기(예: "Vocabulary SR W8")는 시험지에는 노출하지 않음 ──
+                continue
+            
             is_p_answer = "정답" in p_text
             
             # 문제 번호로 시작하는 문단
@@ -281,8 +340,9 @@ def convert_general_to_exam_integrated(source_doc):
                 # 문제번호 줄간격
                 set_paragraph_spacing(new_p, line=LINE_SPACING_Q, after=0)
                 
-                clean_p_text = re.sub(r'^\d+\.\s*', '', p_text)
-                clean_p_text = re.sub(r'^\d+\s+', '', clean_p_text)
+                # 번호 prefix 길이 계산 (예: "1. ", "10) " 등)
+                prefix_match = re.match(r'^\d+[\.\s]+', p_text)
+                prefix_len = len(prefix_match.group()) if prefix_match else 0
                 
                 # 문제 번호 run: 볼드, 11pt
                 run_num = new_p.add_run(f"{q_counter}.")
@@ -300,11 +360,16 @@ def convert_general_to_exam_integrated(source_doc):
                 q_counter += 1
                 
                 if p.runs:
+                    # 원본 번호 prefix를 run 경계와 무관하게 정확히 소비된 글자 수 기준으로 제거
+                    # (번호가 "1"과 "."처럼 서로 다른 run으로 쪼개져 있으면 기존 방식은
+                    #  일부 run에서 매칭에 실패해 번호가 중복으로 남는 문제가 있었음)
+                    consumed = 0
                     for run in p.runs:
                         r_text = run.text
-                        if r_text.strip().startswith(p_text[:2]):
-                            r_text = re.sub(r'^\d+\.\s*', '', r_text)
-                            r_text = re.sub(r'^\d+\s+', '', r_text)
+                        if consumed < prefix_len:
+                            skip = min(prefix_len - consumed, len(r_text))
+                            r_text = r_text[skip:]
+                        consumed += len(run.text)
                         if r_text:
                             new_run = new_p.add_run(r_text)
                             new_run.bold = run.bold
@@ -316,6 +381,7 @@ def convert_general_to_exam_integrated(source_doc):
                             else:
                                 apply_custom_style(new_run, font_name="Noto Sans KR")
                 else:
+                    clean_p_text = p_text[prefix_len:]
                     new_run = new_p.add_run(clean_p_text)
                     new_run.font.size = FONT_SIZE_CHOICE
                     apply_custom_style(new_run, font_name="Noto Sans KR",
@@ -393,6 +459,10 @@ def convert_general_to_exam_integrated(source_doc):
                             dst_run = dst_p_cell.add_run(p_cell.text)
                             dst_run.font.size = FONT_SIZE_CHOICE
                             apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=cell_color)
+
+    # ★ 파일명 기준으로 상단 '(Level X)' 표기 보정 (불가능하면 조용히 무시)
+    level_letter = extract_level_from_filename(source_filename)
+    fix_level_label(target_doc, level_letter)
 
     # ★ 페이지 레이아웃 적용 (2단 컬럼, 좁은 여백)
     apply_exam_page_layout(target_doc)
@@ -671,7 +741,7 @@ if uploaded_file is not None:
                 original_name = os.path.splitext(uploaded_file.name)[0]
 
                 if "일반용 ➡️ 시험지용" in conversion_mode:
-                    out_bytes = convert_general_to_exam_integrated(doc)
+                    out_bytes = convert_general_to_exam_integrated(doc, source_filename=uploaded_file.name)
                     download_filename = f"{original_name}.docx"
                 else:
                     out_bytes = convert_exam_to_general_integrated(doc)
