@@ -668,12 +668,14 @@ if uploaded_file is not None:
     if st.button("🚀 선택한 모드로 정밀 변환 시작", use_container_width=True):
         with st.spinner("문서 컨텍스트 및 지문 인코딩 예외 교정 중..."):
             try:
+                original_name = os.path.splitext(uploaded_file.name)[0]
+
                 if "일반용 ➡️ 시험지용" in conversion_mode:
                     out_bytes = convert_general_to_exam_integrated(doc)
-                    download_filename = "정기평가_최종형_시험지문서.docx"
+                    download_filename = f"{original_name}.docx"
                 else:
                     out_bytes = convert_exam_to_general_integrated(doc)
-                    download_filename = "정기평가_복원형_일반문서.docx"
+                    download_filename = f"{original_name}.docx"
                     
                 st.success("🎉 지문 자동 상자 래핑 및 문제 간격 조정 패치가 적용되었습니다!")
                 st.download_button(
