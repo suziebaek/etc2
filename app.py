@@ -44,7 +44,13 @@ def is_originally_red(run):
     try:
         if run.font.color and run.font.color.rgb:
             hex_color = str(run.font.color.rgb).upper()
-            if hex_color == "FF0000" or "255, 0, 0" in hex_color:
+            if hex_color == "FFFFFF" or hex_color == "000000":
+                return False
+            r = int(hex_color[0:2], 16)
+            g = int(hex_color[2:4], 16)
+            b = int(hex_color[4:6], 16)
+            # 순수 빨강(FF0000)뿐 아니라 EE0000, C00000 등 '붉은 계열'도 정답 표시로 인식
+            if r >= 180 and g <= 80 and b <= 80:
                 return True
     except:
         pass
@@ -150,15 +156,27 @@ def set_cell_properties(cell):
 
 def is_source_label_line(text):
     """
-    'Vocabulary SR W8', 'Vocabulary Reading W3' 같은 출처(문항 소스) 표기 라인을 판별한다.
-    영문/공백으로만 이루어져 있고 끝이 'W숫자' 형태로 끝나는 짧은 줄을 출처 라인으로 간주한다.
+    'Vocabulary SR W8', 'SG E Ch.9' 같은 출처(교재/챕터 코드) 표기 라인을 판별한다.
+    - 한글이 없고, 숫자가 포함되어 있으며, 5단어 이하의 짧은 줄
+    - 문제 번호줄(1. ...)이나 보기(①~⑤)는 제외
     """
     t = text.strip()
     if not t:
         return False
-    if re.match(r'^[A-Za-z][A-Za-z\s&/]*\sW\d+$', t):
-        return True
-    return False
+    if t.startswith(('①', '②', '③', '④', '⑤')):
+        return False
+    if re.match(r'^\d+[\.\)]\s', t):
+        return False
+    if re.search(r'[\uAC00-\uD7A3]', t):  # 한글 포함 시 출처 라인 아님
+        return False
+    if not re.search(r'\d', t):  # 숫자가 없으면 출처 라인이 아님
+        return False
+    words = t.split()
+    if len(words) > 5 or len(t) > 25:
+        return False
+    if t.endswith(('.', '?', '!')) and len(words) > 3:
+        return False
+    return True
 
 def extract_level_from_filename(filename):
     """업로드 파일명에서 'Level_T', 'Level T' 등의 패턴으로 레벨 알파벳을 추출한다."""
