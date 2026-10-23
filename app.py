@@ -111,40 +111,120 @@ def set_paragraph_spacing(p, line=240, after=0, line_rule="auto"):
     spacing.set(qn('w:line'), str(line))
     spacing.set(qn('w:lineRule'), line_rule)
 
-def set_table_width_to_column(table):
-    table.allow_autofit = False
-    tblPr = table._tbl.tblPr
+# 시험지용 2단 레이아웃의 한 단 너비 (apply_exam_page_layout의 w:col w:w 값과 동일)
+EXAM_COLUMN_WIDTH = 5020  # twips
+
+
+def set_table_width_to_column(table, width_twips=None):
+    """
+    표 너비 설정.
+    - width_twips 지정 시(시험지용): 표 너비·열 너비(tblGrid)·셀 너비를 모두 twips로 고정한다.
+      ※ python-docx의 add_table()은 열 너비(gridCol)를 '페이지 전체 너비'(약 10466)로 만들기 때문에,
+        예전처럼 표 너비만 5000pct로 두고 레이아웃을 고정(fixed)하면 Word가 gridCol 값을 따라
+        표를 단 너비의 2배로 그려 오른쪽이 잘렸다.
+    - width_twips 미지정 시(일반용 1단): 기존처럼 100%(5000pct)
+    """
+    tbl = table._tbl
+    tblPr = tbl.tblPr
     if tblPr is None:
         tblPr = OxmlElement('w:tblPr')
-        table._tbl.insert(0, tblPr)
-        
+        tbl.insert(0, tblPr)
+
     for child in list(tblPr):
-        if child.tag.endswith('tblW'):
+        if child.tag.endswith('}tblW') or child.tag.endswith('}tblLayout') or child.tag.endswith('}tblInd'):
             tblPr.remove(child)
-            
+
     tblW = OxmlElement('w:tblW')
-    tblW.set(qn('w:w'), '5000')
-    tblW.set(qn('w:type'), 'pct')
+    if width_twips:
+        tblW.set(qn('w:w'), str(width_twips))
+        tblW.set(qn('w:type'), 'dxa')
+    else:
+        tblW.set(qn('w:w'), '5000')
+        tblW.set(qn('w:type'), 'pct')
     tblPr.append(tblW)
+
+    if not width_twips:
+        table.allow_autofit = False
+        return
+
+    tblInd = OxmlElement('w:tblInd')
+    tblInd.set(qn('w:w'), '0')
+    tblInd.set(qn('w:type'), 'dxa')
+    tblPr.append(tblInd)
+    tblLayout = OxmlElement('w:tblLayout')
+    tblLayout.set(qn('w:type'), 'fixed')
+    tblPr.append(tblLayout)
+
+    # 열 너비(gridCol)를 단 너비에 맞게 균등 분배
+    grid = tbl.find(qn('w:tblGrid'))
+    n_cols = len(grid.findall(qn('w:gridCol'))) if grid is not None else 1
+    n_cols = max(n_cols, 1)
+    base = width_twips // n_cols
+    widths = [base] * n_cols
+    widths[-1] += width_twips - base * n_cols
+    if grid is not None:
+        for gc, w in zip(grid.findall(qn('w:gridCol')), widths):
+            gc.set(qn('w:w'), str(w))
+    _sort_tblPr(tblPr)
+
+
+# w:tblPr 자식 요소의 스키마 순서 (순서가 어긋나면 Word가 일부 속성을 무시할 수 있음)
+_TBLPR_ORDER = ['tblStyle', 'tblpPr', 'tblOverlap', 'bidiVisual', 'tblStyleRowBandSize',
+                'tblStyleColBandSize', 'tblW', 'jc', 'tblCellSpacing', 'tblInd', 'tblBorders',
+                'shd', 'tblLayout', 'tblCellMar', 'tblLook', 'tblCaption', 'tblDescription']
+
+def _sort_tblPr(tblPr):
+    kids = list(tblPr)
+    def key(el):
+        name = el.tag.split('}')[-1]
+        return _TBLPR_ORDER.index(name) if name in _TBLPR_ORDER else len(_TBLPR_ORDER)
+    for el in kids:
+        tblPr.remove(el)
+    for el in sorted(kids, key=key):
+        tblPr.append(el)
+
+
+def _exam_cell_width(tc):
+    """셀이 속한 표가 twips 고정 너비이면, 셀 위치에 해당하는 gridCol 너비를 돌려준다."""
+    tr = tc.getparent()
+    tbl = tr.getparent() if tr is not None else None
+    if tbl is None or not tbl.tag.endswith('}tbl'):
+        return None
+    tblPr = tbl.find(qn('w:tblPr'))
+    tblW = tblPr.find(qn('w:tblW')) if tblPr is not None else None
+    if tblW is None or tblW.get(qn('w:type')) != 'dxa':
+        return None
+    grid = tbl.find(qn('w:tblGrid'))
+    if grid is None:
+        return None
+    cols = [int(g.get(qn('w:w'))) for g in grid.findall(qn('w:gridCol'))]
+    # gridSpan(가로 병합)을 고려해 셀이 차지하는 열 너비 합산
+    idx = 0
+    for other in tr.findall(qn('w:tc')):
+        span_el = other.find(f"{qn('w:tcPr')}/{qn('w:gridSpan')}")
+        span = int(span_el.get(qn('w:val'))) if span_el is not None else 1
+        if other is tc:
+            return sum(cols[idx:idx + span]) if cols[idx:idx + span] else None
+        idx += span
+    return None
+
 
 def set_cell_properties(cell):
     tcPr = cell._tc.get_or_add_tcPr()
     for child in list(tcPr):
-        if child.tag.endswith('tcW'):
+        if child.tag.endswith('tcW') or child.tag.endswith('tcMar') or child.tag.endswith('tcBorders'):
             tcPr.remove(child)
     tcW = OxmlElement('w:tcW')
-    tcW.set(qn('w:w'), '5000')
-    tcW.set(qn('w:type'), 'pct')
-    tcPr.append(tcW)
+    exam_w = _exam_cell_width(cell._tc)
+    if exam_w:
+        tcW.set(qn('w:w'), str(exam_w))
+        tcW.set(qn('w:type'), 'dxa')
+    else:
+        tcW.set(qn('w:w'), '5000')
+        tcW.set(qn('w:type'), 'pct')
+    tcPr.insert(0, tcW)  # tcW는 tcPr의 첫 번째 자식이어야 함
     
-    tcMar = OxmlElement('w:tcMar')
-    for m, val in [('top', 140), ('bottom', 140), ('left', 160), ('right', 160)]:
-        node = OxmlElement(f'w:{m}')
-        node.set(qn('w:w'), str(val))
-        node.set(qn('w:type'), 'dxa')
-        tcMar.append(node)
-    tcPr.append(tcMar)
-
+    # 스키마 순서: tcW → tcBorders → tcMar
     tcBorders = OxmlElement('w:tcBorders')
     for border_name in ['top', 'left', 'bottom', 'right']:
         border = OxmlElement(f'w:{border_name}')
@@ -154,6 +234,14 @@ def set_cell_properties(cell):
         border.set(qn('w:color'), '000000')
         tcBorders.append(border)
     tcPr.append(tcBorders)
+
+    tcMar = OxmlElement('w:tcMar')
+    for m, val in [('top', 140), ('left', 160), ('bottom', 140), ('right', 160)]:
+        node = OxmlElement(f'w:{m}')
+        node.set(qn('w:w'), str(val))
+        node.set(qn('w:type'), 'dxa')
+        tcMar.append(node)
+    tcPr.append(tcMar)
 
 def is_source_label_line(text):
     """
@@ -313,7 +401,7 @@ def flush_passage_buffer(target_doc, buffer):
 
     table = target_doc.add_table(rows=1, cols=1)
     table.style = 'Table Grid'
-    set_table_width_to_column(table)
+    set_table_width_to_column(table, EXAM_COLUMN_WIDTH)
     cell = table.cell(0, 0)
     set_cell_properties(cell)
     cell.text = ""
@@ -321,6 +409,9 @@ def flush_passage_buffer(target_doc, buffer):
     for idx, p_src in enumerate(buffer):
         p_dst = cell.paragraphs[0] if idx == 0 else cell.add_paragraph()
         set_paragraph_spacing(p_dst, line=LINE_SPACING_BODY, after=0)
+        if '\n' in p_src.text:
+            # 줄바꿈(Shift+Enter)이 있는 단락은 양쪽 정렬 시 글자가 벌어지므로 왼쪽 정렬
+            p_dst.alignment = WD_ALIGN_PARAGRAPH.LEFT
         is_p_answer = "정답" in p_src.text
         if p_src.runs:
             for run in p_src.runs:
@@ -490,7 +581,7 @@ def convert_general_to_exam_integrated(source_doc, source_filename=None):
             
             dst_tbl = target_doc.add_table(rows=len(src_tbl.rows), cols=len(src_tbl.columns))
             dst_tbl.style = 'Table Grid'
-            set_table_width_to_column(dst_tbl)
+            set_table_width_to_column(dst_tbl, EXAM_COLUMN_WIDTH)
             
             for r_idx, row in enumerate(src_tbl.rows):
                 for c_idx, cell in enumerate(row.cells):
