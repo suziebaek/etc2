@@ -4,6 +4,7 @@ from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import RGBColor, Pt, Twips
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 import io
 import re
 import os
@@ -187,6 +188,33 @@ def extract_level_from_filename(filename):
         return m.group(1).upper()
     return None
 
+def extract_season_from_filename(filename):
+    """업로드 파일명에서 '봄/여름/가을/겨울' 학기를 추출한다. (예: '26_가을_...' → '가을')"""
+    if not filename:
+        return None
+    m = re.search(r'(봄|여름|가을|겨울)', filename)
+    return m.group(1) if m else None
+
+def fix_season_label(target_doc, season):
+    """템플릿에 고정된 'OO학기'(예: 여름학기)를 파일명 기준 학기로 교체한다."""
+    if not season:
+        return
+    pattern = re.compile(r'(봄|여름|가을|겨울)(?=\s*학기)')
+    for p in target_doc.paragraphs[:5]:
+        if '학기' not in p.text or not pattern.search(p.text):
+            continue
+        runs = p.runs
+        # run이 '2026년 ' / '여름' / '학기 ...'처럼 쪼개져 있을 수 있음
+        for i, run in enumerate(runs):
+            if pattern.search(run.text):
+                run.text = pattern.sub(season, run.text)
+                return
+            nxt = runs[i + 1].text if i + 1 < len(runs) else ''
+            if re.fullmatch(r'\s*(봄|여름|가을|겨울)\s*', run.text) and nxt.lstrip().startswith('학기'):
+                run.text = run.text.replace(run.text.strip(), season)
+                return
+        return
+
 def fix_level_label(target_doc, level_letter):
     """템플릿에 고정 삽입된 '(Level X)' 표기를 업로드 파일명 기준 레벨로 교체한다."""
     if not level_letter:
@@ -272,46 +300,47 @@ def apply_exam_page_layout(target_doc):
     sectPr.append(docGrid)
 
 def flush_passage_buffer(target_doc, buffer):
-    """버퍼링된 평문 지문들을 일반용 지문 상자(표 1칸) 구조로 빌드하여 삽입합니다."""
+    """
+    버퍼링된 평문 지문 단락들을 지문 상자(1칸 표)로 만들어 삽입한다.
+    - 원본에서 지문이 표가 아니라 일반 단락으로 들어 있는 문서(예: N레벨 어휘)를
+      표로 된 지문 상자가 있는 문서(예: S레벨 문법)와 같은 모양으로 맞추기 위함
+    - 서식은 표 복사 경로와 동일: Noto Sans KR 9pt, 줄간격 240, 단락 뒤 0
+    - 밑줄/굵게/기울임 및 빨간 정답 표시는 그대로 유지
+    """
     if not buffer:
         return
-        
+    red_color = RGBColor(255, 0, 0)
+
     table = target_doc.add_table(rows=1, cols=1)
     table.style = 'Table Grid'
     set_table_width_to_column(table)
     cell = table.cell(0, 0)
     set_cell_properties(cell)
-    
     cell.text = ""
-    is_first = True
-    
-    for p_src in buffer:
-        if is_first:
-            p_dst = cell.paragraphs[0]
-            is_first = False
-        else:
-            p_dst = cell.add_paragraph()
-            
-        p_dst.paragraph_format.line_spacing = 1.2
-        p_dst.paragraph_format.space_after = Pt(4)
-        
+
+    for idx, p_src in enumerate(buffer):
+        p_dst = cell.paragraphs[0] if idx == 0 else cell.add_paragraph()
+        set_paragraph_spacing(p_dst, line=LINE_SPACING_BODY, after=0)
+        is_p_answer = "정답" in p_src.text
         if p_src.runs:
             for run in p_src.runs:
+                if not run.text:
+                    continue
                 dst_run = p_dst.add_run(run.text)
                 dst_run.bold = run.bold
                 dst_run.italic = run.italic
                 dst_run.underline = run.underline
-                if "정답" in run.text or is_originally_red(run):
-                    apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=RGBColor(255, 0, 0))
+                dst_run.font.size = FONT_SIZE_CHOICE
+                if is_p_answer or "정답" in run.text or is_originally_red(run):
+                    apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=red_color)
                 else:
                     apply_custom_style(dst_run, font_name="Noto Sans KR")
         else:
             dst_run = p_dst.add_run(p_src.text)
-            if "정답" in p_src.text:
-                apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=RGBColor(255, 0, 0))
-            else:
-                apply_custom_style(dst_run, font_name="Noto Sans KR")
-                
+            dst_run.font.size = FONT_SIZE_CHOICE
+            apply_custom_style(dst_run, font_name="Noto Sans KR",
+                               color_rgb=red_color if is_p_answer else None)
+
     buffer.clear()
 
 
@@ -333,6 +362,10 @@ def convert_general_to_exam_integrated(source_doc, source_filename=None):
     
     q_counter = 1
     red_color = RGBColor(255, 0, 0)
+    # ★ 문제 번호 줄과 선지(①~⑤) 사이에 '일반 단락'으로 들어 있는 지문을 모았다가
+    #   지문 상자(1칸 표)로 감싼다. (N레벨처럼 지문이 표가 아닌 문서 대응)
+    passage_buffer = []
+    after_question = False
     
     for element in get_body_elements(source_doc):
         if element.tag.endswith('p'):
@@ -347,9 +380,21 @@ def convert_general_to_exam_integrated(source_doc, source_filename=None):
                 continue
             
             is_p_answer = "정답" in p_text
+            is_question_line = bool(re.match(r'^\d+[\.\s]', p_text))
+
+            # ── 문제 번호 다음, 선지 이전의 일반 단락 → 지문으로 수집 ──
+            if (after_question and not is_question_line
+                    and not is_option_line(p_text) and not is_p_answer):
+                passage_buffer.append(p)
+                continue
+
+            # 지문 수집 구간이 끝났으면 상자로 출력
+            flush_passage_buffer(target_doc, passage_buffer)
+            after_question = False
             
             # 문제 번호로 시작하는 문단
-            if re.match(r'^\d+[\.\s]', p_text):
+            if is_question_line:
+                after_question = True
                 if q_counter > 1:
                     target_doc.add_paragraph()
                     target_doc.add_paragraph()
@@ -408,6 +453,10 @@ def convert_general_to_exam_integrated(source_doc, source_filename=None):
                 # 선지, 정답, 지문 등 일반 단락
                 new_p = target_doc.add_paragraph()
                 set_paragraph_spacing(new_p, line=LINE_SPACING_BODY, after=0)
+                if is_option_line(p_text):
+                    # 선지가 줄바꿈(Shift+Enter)으로 한 단락에 묶여 있으면 양쪽 정렬 때문에
+                    # "①          at" 처럼 글자가 벌어지므로 선지는 왼쪽 정렬
+                    new_p.alignment = WD_ALIGN_PARAGRAPH.LEFT
                 
                 if p.runs:
                     for run in p.runs:
@@ -427,6 +476,8 @@ def convert_general_to_exam_integrated(source_doc, source_filename=None):
                                        color_rgb=red_color if is_p_answer else None)
                         
         elif element.tag.endswith('tbl'):
+            # 표가 나오면 그 전까지 모은 평문 지문을 먼저 상자로 출력
+            flush_passage_buffer(target_doc, passage_buffer)
             src_tbl = docx.table.Table(element, source_doc)
             has_valid_content = False
             for row in src_tbl.rows:
@@ -478,9 +529,14 @@ def convert_general_to_exam_integrated(source_doc, source_filename=None):
                             dst_run.font.size = FONT_SIZE_CHOICE
                             apply_custom_style(dst_run, font_name="Noto Sans KR", color_rgb=cell_color)
 
+    # 문서 끝에 남은 지문 출력
+    flush_passage_buffer(target_doc, passage_buffer)
+
     # ★ 파일명 기준으로 상단 '(Level X)' 표기 보정 (불가능하면 조용히 무시)
     level_letter = extract_level_from_filename(source_filename)
     fix_level_label(target_doc, level_letter)
+    # ★ 파일명 기준으로 상단 'OO학기' 표기 보정 (예: 여름학기 → 가을학기)
+    fix_season_label(target_doc, extract_season_from_filename(source_filename))
 
     # ★ 페이지 레이아웃 적용 (2단 컬럼, 좁은 여백)
     apply_exam_page_layout(target_doc)
